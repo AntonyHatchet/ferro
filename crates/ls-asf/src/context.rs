@@ -22,7 +22,7 @@ impl RequestContext {
             service_name: String::new(),
             operation: String::new(),
             protocol: "query".to_string(),
-            region: "us-east-1".to_string(),
+            region: std::env::var("AWS_DEFAULT_REGION").unwrap_or_else(|_| "us-east-1".to_string()),
             account_id: "000000000000".to_string(),
             request_id: uuid::Uuid::new_v4().to_string(),
             method: String::new(),

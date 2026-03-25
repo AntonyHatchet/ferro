@@ -89,20 +89,22 @@ async fn handle_request(
         .cloned();
 
     if method == Method::OPTIONS {
+        tracing::debug!(target: "ferro::http", "{} {} -> CORS preflight", method, uri);
         return build_cors_preflight(origin.as_deref(), &ctx);
     }
 
-    let auth_header = ctx
+    let credential = ctx
         .headers
         .get("authorization")
         .or_else(|| ctx.headers.get("Authorization"))
         .cloned()
+        .or_else(|| ctx.query_params.get("X-Amz-Credential").map(|c| format!("Credential={c}")))
         .unwrap_or_default();
 
-    if let Some(region) = extract_region_from_auth(&auth_header) {
+    if let Some(region) = extract_region_from_auth(&credential) {
         ctx.region = region;
     }
-    if let Some(account) = extract_account_from_auth(&auth_header) {
+    if let Some(account) = extract_account_from_auth(&credential) {
         ctx.account_id = account;
     }
 
@@ -143,9 +145,20 @@ async fn handle_request(
     let request_id = ctx.request_id.clone();
     let op_for_error = ctx.operation.clone();
 
+    let path = uri.path();
+    let started = std::time::Instant::now();
+
     let mut response = match handler.handle(ctx, params).await {
-        Ok(resp) => build_response(resp, &request_id),
-        Err(err) => build_error_response(&err, protocol, &request_id, &service_name, &op_for_error),
+        Ok(resp) => {
+            let ms = started.elapsed().as_secs_f64() * 1000.0;
+            log_request(&service_name, &method, path, &op_for_error, resp.status, None, ms);
+            build_response(resp, &request_id)
+        }
+        Err(ref err) => {
+            let ms = started.elapsed().as_secs_f64() * 1000.0;
+            log_request(&service_name, &method, path, &op_for_error, err.status_code, Some(&err.code), ms);
+            build_error_response(err, protocol, &request_id, &service_name, &op_for_error)
+        }
     };
 
     if origin.is_some() {
@@ -253,6 +266,30 @@ fn extract_account_from_auth(auth: &str) -> Option<String> {
         Some(access_key[..12].to_string())
     } else {
         None
+    }
+}
+
+macro_rules! log_to_target {
+    ($target:expr, $is_err:expr, $($arg:tt)*) => {
+        if $is_err {
+            tracing::warn!(target: $target, $($arg)*);
+        } else {
+            tracing::info!(target: $target, $($arg)*);
+        }
+    };
+}
+
+fn log_request(service: &str, method: &Method, path: &str, op: &str, status: u16, error_code: Option<&str>, ms: f64) {
+    let is_err = error_code.is_some();
+    let detail = match error_code {
+        Some(code) => format!("{} {} {}.{} -> {} {}  ({:.1}ms)", method, path, service, op, status, code, ms),
+        None => format!("{} {} {}.{} -> {}  ({:.1}ms)", method, path, service, op, status, ms),
+    };
+    match service {
+        "s3" => log_to_target!("ferro::s3", is_err, "{}", detail),
+        "sqs" => log_to_target!("ferro::sqs", is_err, "{}", detail),
+        "sns" => log_to_target!("ferro::sns", is_err, "{}", detail),
+        _ => log_to_target!("ferro::http", is_err, "{}", detail),
     }
 }
 

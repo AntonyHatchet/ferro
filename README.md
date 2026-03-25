@@ -58,7 +58,8 @@ Place an `init.json` file in the init directory (default: `./init/` or `/etc/fer
       "subscriptions": [
         {
           "protocol": "sqs",
-          "endpoint": "arn:aws:sqs:us-east-1:000000000000:orders-queue"
+          "endpoint": "arn:aws:sqs:us-east-1:000000000000:orders-queue",
+          "raw_message_delivery": true
         }
       ]
     },
@@ -83,6 +84,8 @@ Place an `init.json` file in the init directory (default: `./init/` or `/etc/fer
   ]
 }
 ```
+
+SNS subscriptions support `raw_message_delivery` (default: `false`). When `true`, SNS delivers the raw message to SQS without wrapping it in the SNS envelope JSON. Set this for any SQS consumer that expects the original message body.
 
 S3 buckets support `seed_dir` to upload an entire directory tree at boot.
 

@@ -82,6 +82,16 @@ async fn handle_request(
         }
     }
 
+    let origin = ctx
+        .headers
+        .get("origin")
+        .or_else(|| ctx.headers.get("Origin"))
+        .cloned();
+
+    if method == Method::OPTIONS {
+        return build_cors_preflight(origin.as_deref(), &ctx);
+    }
+
     let auth_header = ctx
         .headers
         .get("authorization")
@@ -133,10 +143,16 @@ async fn handle_request(
     let request_id = ctx.request_id.clone();
     let op_for_error = ctx.operation.clone();
 
-    match handler.handle(ctx, params).await {
+    let mut response = match handler.handle(ctx, params).await {
         Ok(resp) => build_response(resp, &request_id),
         Err(err) => build_error_response(&err, protocol, &request_id, &service_name, &op_for_error),
+    };
+
+    if origin.is_some() {
+        inject_cors_headers(response.headers_mut(), origin.as_deref());
     }
+
+    response
 }
 
 fn detect_service(ctx: &RequestContext) -> String {
@@ -238,6 +254,40 @@ fn extract_account_from_auth(auth: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+fn build_cors_preflight(origin: Option<&str>, ctx: &RequestContext) -> axum::response::Response {
+    let origin = origin.unwrap_or("*");
+    let request_method = ctx
+        .headers
+        .get("access-control-request-method")
+        .or_else(|| ctx.headers.get("Access-Control-Request-Method"))
+        .cloned()
+        .unwrap_or_else(|| "GET, PUT, POST, DELETE, HEAD".to_string());
+    let request_headers = ctx
+        .headers
+        .get("access-control-request-headers")
+        .or_else(|| ctx.headers.get("Access-Control-Request-Headers"))
+        .cloned()
+        .unwrap_or_else(|| "*".to_string());
+
+    axum::response::Response::builder()
+        .status(200)
+        .header("Access-Control-Allow-Origin", origin)
+        .header("Access-Control-Allow-Methods", request_method)
+        .header("Access-Control-Allow-Headers", request_headers)
+        .header("Access-Control-Expose-Headers", "ETag, x-amz-request-id, x-amz-version-id, x-amz-delete-marker, x-amz-server-side-encryption")
+        .header("Access-Control-Max-Age", "3600")
+        .header("Access-Control-Allow-Credentials", "true")
+        .body(Body::empty())
+        .unwrap()
+}
+
+fn inject_cors_headers(headers: &mut axum::http::HeaderMap, origin: Option<&str>) {
+    let origin = origin.unwrap_or("*");
+    headers.insert("Access-Control-Allow-Origin", origin.parse().unwrap());
+    headers.insert("Access-Control-Expose-Headers", "ETag, x-amz-request-id, x-amz-version-id, x-amz-delete-marker, x-amz-server-side-encryption".parse().unwrap());
+    headers.insert("Access-Control-Allow-Credentials", "true".parse().unwrap());
 }
 
 fn build_response(resp: ServiceResponse, request_id: &str) -> axum::response::Response {

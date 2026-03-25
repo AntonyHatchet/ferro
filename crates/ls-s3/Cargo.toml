@@ -13,3 +13,6 @@ uuid = { workspace = true }
 md5 = { workspace = true }
 urlencoding = { workspace = true }
 dashmap = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

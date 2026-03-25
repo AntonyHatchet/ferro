@@ -69,11 +69,13 @@ Place an `init.json` file in the init directory (default: `./init/` or `/etc/fer
   "s3": [
     {
       "name": "app-assets",
-      "seed_dir": "./seed-data"
+      "seed_dir": "./seed-data",
+      "cors": true
     },
     {
       "name": "uploads",
-      "versioning": true
+      "versioning": true,
+      "cors": true
     },
     {
       "name": "logs"
@@ -83,6 +85,10 @@ Place an `init.json` file in the init directory (default: `./init/` or `/etc/fer
 ```
 
 S3 buckets support `seed_dir` to upload an entire directory tree at boot.
+
+S3 buckets support `cors` for CORS configuration:
+- `"cors": true` — permissive CORS (all origins, common methods, all headers) for local dev
+- `"cors": [{ "allowed_origins": ["https://example.com"], "allowed_methods": ["GET", "PUT"], "allowed_headers": ["*"] }]` — explicit rules with optional `expose_headers` and `max_age_seconds`
 
 ### 2. Shell Scripts (`ready.d/`)
 

@@ -1,6 +1,6 @@
 use crate::models::*;
 use bytes::Bytes;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use ls_asf::context::RequestContext;
 use ls_asf::error::ServiceException;
 use ls_asf::parser;
@@ -265,7 +265,7 @@ impl S3Service {
         resp.headers.insert("Content-Type".to_string(), obj.content_type.clone());
         resp.headers.insert("ETag".to_string(), format!("\"{}\"", obj.etag));
         resp.headers.insert("Content-Length".to_string(), obj.content_length.to_string());
-        resp.headers.insert("Last-Modified".to_string(), obj.last_modified.to_rfc2822());
+        resp.headers.insert("Last-Modified".to_string(), http_date(&obj.last_modified));
         if let Some(ref vid) = obj.version_id {
             resp.headers.insert("x-amz-version-id".to_string(), vid.clone());
         }
@@ -297,7 +297,7 @@ impl S3Service {
         resp.headers.insert("Content-Type".to_string(), obj.content_type.clone());
         resp.headers.insert("ETag".to_string(), format!("\"{}\"", obj.etag));
         resp.headers.insert("Content-Length".to_string(), obj.content_length.to_string());
-        resp.headers.insert("Last-Modified".to_string(), obj.last_modified.to_rfc2822());
+        resp.headers.insert("Last-Modified".to_string(), http_date(&obj.last_modified));
         if let Some(ref vid) = obj.version_id {
             resp.headers.insert("x-amz-version-id".to_string(), vid.clone());
         }
@@ -983,6 +983,10 @@ fn get_key(ctx: &RequestContext, params: &serde_json::Value) -> Result<String, S
 
 fn param_str(params: &serde_json::Value, key: &str) -> Option<String> {
     params.get(key).and_then(|v| v.as_str()).map(|s| s.to_string())
+}
+
+fn http_date(dt: &DateTime<Utc>) -> String {
+    dt.format("%a, %d %b %Y %H:%M:%S GMT").to_string()
 }
 
 fn xml_escape(s: &str) -> String {

@@ -8,10 +8,12 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() {
+    let log_filter = std::env::var("FERRO_LOG")
+        .or_else(|_| std::env::var("RUST_LOG"))
+        .unwrap_or_else(|_| "info".to_string());
+
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
+        .with_env_filter(EnvFilter::new(&log_filter))
         .init();
 
     init::ensure_dirs();

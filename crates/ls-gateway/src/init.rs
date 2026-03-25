@@ -45,7 +45,36 @@ pub struct S3BucketInit {
     pub seed_dir: Option<String>,
     #[serde(default)]
     pub versioning: bool,
+    #[serde(default)]
+    pub cors: CorsInit,
 }
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(untagged)]
+pub enum CorsInit {
+    #[default]
+    None,
+    Permissive(bool),
+    Rules(Vec<CorsRuleInit>),
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CorsRuleInit {
+    #[serde(default = "default_cors_origins")]
+    pub allowed_origins: Vec<String>,
+    #[serde(default = "default_cors_methods")]
+    pub allowed_methods: Vec<String>,
+    #[serde(default = "default_cors_headers")]
+    pub allowed_headers: Vec<String>,
+    #[serde(default)]
+    pub expose_headers: Vec<String>,
+    #[serde(default)]
+    pub max_age_seconds: Option<u32>,
+}
+
+fn default_cors_origins() -> Vec<String> { vec!["*".to_string()] }
+fn default_cors_methods() -> Vec<String> { vec!["GET".to_string(), "PUT".to_string(), "POST".to_string(), "DELETE".to_string(), "HEAD".to_string()] }
+fn default_cors_headers() -> Vec<String> { vec!["*".to_string()] }
 
 pub fn data_dir() -> PathBuf {
     std::env::var("FERRO_DATA_DIR")
@@ -318,10 +347,61 @@ async fn create_s3_buckets(
             tracing::info!("  [s3] Enabled versioning on: {}", b.name);
         }
 
+        let cors_xml = match &b.cors {
+            CorsInit::Permissive(true) => Some(build_cors_xml(&[CorsRuleInit {
+                allowed_origins: vec!["*".to_string()],
+                allowed_methods: vec!["GET".into(), "PUT".into(), "POST".into(), "DELETE".into(), "HEAD".into()],
+                allowed_headers: vec!["*".to_string()],
+                expose_headers: vec!["ETag".into(), "x-amz-request-id".into(), "x-amz-version-id".into()],
+                max_age_seconds: Some(3600),
+            }])),
+            CorsInit::Rules(rules) if !rules.is_empty() => Some(build_cors_xml(rules)),
+            _ => None,
+        };
+
+        if let Some(xml) = cors_xml {
+            let mut cors_ctx = RequestContext::new();
+            cors_ctx.service_name = "s3".to_string();
+            cors_ctx.operation = "PutBucketCors".to_string();
+            cors_ctx.region = region.to_string();
+            cors_ctx.account_id = account.to_string();
+            cors_ctx.uri = format!("/{}?cors", b.name);
+            cors_ctx.body = axum::body::Bytes::from(xml);
+
+            let params = serde_json::json!({ "Bucket": &b.name });
+            let _ = handler.handle(cors_ctx, params).await;
+            tracing::info!("  [s3] Configured CORS on: {}", b.name);
+        }
+
         if let Some(ref seed_dir) = b.seed_dir {
             seed_bucket(registry, &b.name, seed_dir, region, account).await;
         }
     }
+}
+
+fn build_cors_xml(rules: &[CorsRuleInit]) -> String {
+    let mut xml = String::from("<CORSConfiguration>");
+    for rule in rules {
+        xml.push_str("<CORSRule>");
+        for origin in &rule.allowed_origins {
+            xml.push_str(&format!("<AllowedOrigin>{origin}</AllowedOrigin>"));
+        }
+        for method in &rule.allowed_methods {
+            xml.push_str(&format!("<AllowedMethod>{method}</AllowedMethod>"));
+        }
+        for header in &rule.allowed_headers {
+            xml.push_str(&format!("<AllowedHeader>{header}</AllowedHeader>"));
+        }
+        for header in &rule.expose_headers {
+            xml.push_str(&format!("<ExposeHeader>{header}</ExposeHeader>"));
+        }
+        if let Some(max_age) = rule.max_age_seconds {
+            xml.push_str(&format!("<MaxAgeSeconds>{max_age}</MaxAgeSeconds>"));
+        }
+        xml.push_str("</CORSRule>");
+    }
+    xml.push_str("</CORSConfiguration>");
+    xml
 }
 
 async fn seed_bucket(

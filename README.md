@@ -69,11 +69,13 @@ Place an `init.json` file in the init directory (default: `./init/` or `/etc/fer
   "s3": [
     {
       "name": "app-assets",
-      "seed_dir": "./seed-data"
+      "seed_dir": "./seed-data",
+      "cors": true
     },
     {
       "name": "uploads",
-      "versioning": true
+      "versioning": true,
+      "cors": true
     },
     {
       "name": "logs"
@@ -83,6 +85,10 @@ Place an `init.json` file in the init directory (default: `./init/` or `/etc/fer
 ```
 
 S3 buckets support `seed_dir` to upload an entire directory tree at boot.
+
+S3 buckets support `cors` for CORS configuration:
+- `"cors": true` — permissive CORS (all origins, common methods, all headers) for local dev
+- `"cors": [{ "allowed_origins": ["https://example.com"], "allowed_methods": ["GET", "PUT"], "allowed_headers": ["*"] }]` — explicit rules with optional `expose_headers` and `max_age_seconds`
 
 ### 2. Shell Scripts (`ready.d/`)
 
@@ -106,11 +112,40 @@ Scripts receive these environment
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `GATEWAY_LISTEN` | `:4566` | Server listen address |
+| `FERRO_LOG` | `info` | Log level / filter (see [Logging](#logging) below) |
 | `FERRO_INIT_DIR` | `./init` or `/etc/ferro/init` | Init scripts and config root |
 | `FERRO_INIT_CONFIG` | (auto-discovered) | Explicit path to `init.json` |
 | `FERRO_DATA_DIR` | `/var/lib/ferro` | Data directory |
 | `AWS_DEFAULT_REGION` | `us-east-1` | Default region for init resources |
 | `AWS_ACCOUNT_ID` | `000000000000` | Default account ID |
+
+### Logging
+
+Control log verbosity with `FERRO_LOG` (or `RUST_LOG`). Request logs use per-service targets:
+
+| Target | Logs |
+|--------|------|
+| `ferro::s3` | S3 requests (PutObject, GetObject, etc.) |
+| `ferro::sqs` | SQS requests (SendMessage, ReceiveMessage, etc.) |
+| `ferro::sns` | SNS requests (Publish, Subscribe, etc.) |
+| `ferro::http` | CORS preflights and unmatched requests |
+| `ferro::init` | Startup and init.json resource creation |
+
+Examples:
+
+```yaml
+environment:
+  # Default — all requests at info level
+  - FERRO_LOG=info
+  # Quiet SQS polling, normal S3/SNS
+  - FERRO_LOG=info,ferro::sqs=warn
+  # Debug S3 only
+  - FERRO_LOG=warn,ferro::s3=debug
+  # Everything including CORS preflights
+  - FERRO_LOG=debug
+  # Silent except errors
+  - FERRO_LOG=warn
+```
 
 ### Init Directory Structure
 

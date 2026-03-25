@@ -36,6 +36,8 @@ pub struct SnsTopicInit {
 pub struct SnsSubscriptionInit {
     pub protocol: String,
     pub endpoint: String,
+    #[serde(default)]
+    pub raw_message_delivery: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -289,10 +291,55 @@ async fn create_sns_topics(
                 serde_json::Value::String(sub.endpoint.clone()),
             );
 
-            match handler
+            let sub_response = handler
                 .handle(sub_ctx, serde_json::Value::Object(sub_params))
-                .await
-            {
+                .await;
+
+            match sub_response {
+                Ok(ref resp) if sub.raw_message_delivery => {
+                    tracing::info!(
+                        "  [sns] Subscribed {} -> {}:{}",
+                        t.name,
+                        sub.protocol,
+                        sub.endpoint
+                    );
+
+                    if let Some(sub_arn) = extract_subscription_arn(&resp.body) {
+                        let mut attr_ctx = RequestContext::new();
+                        attr_ctx.service_name = "sns".to_string();
+                        attr_ctx.operation = "SetSubscriptionAttributes".to_string();
+                        attr_ctx.region = region.to_string();
+                        attr_ctx.account_id = account.to_string();
+
+                        let mut attr_params = serde_json::Map::new();
+                        attr_params.insert(
+                            "SubscriptionArn".to_string(),
+                            serde_json::Value::String(sub_arn.clone()),
+                        );
+                        attr_params.insert(
+                            "AttributeName".to_string(),
+                            serde_json::Value::String("RawMessageDelivery".to_string()),
+                        );
+                        attr_params.insert(
+                            "AttributeValue".to_string(),
+                            serde_json::Value::String("true".to_string()),
+                        );
+
+                        match handler
+                            .handle(attr_ctx, serde_json::Value::Object(attr_params))
+                            .await
+                        {
+                            Ok(_) => tracing::info!(
+                                "  [sns] Set RawMessageDelivery=true on {}",
+                                sub_arn
+                            ),
+                            Err(e) => tracing::error!(
+                                "  [sns] Failed to set RawMessageDelivery on {}: {e}",
+                                sub_arn
+                            ),
+                        }
+                    }
+                }
                 Ok(_) => tracing::info!(
                     "  [sns] Subscribed {} -> {}:{}",
                     t.name,
@@ -303,6 +350,14 @@ async fn create_sns_topics(
             }
         }
     }
+}
+
+fn extract_subscription_arn(body: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(body).ok()?;
+    let start = text.find("<SubscriptionArn>")?;
+    let after = &text[start + "<SubscriptionArn>".len()..];
+    let end = after.find("</SubscriptionArn>")?;
+    Some(after[..end].to_string())
 }
 
 async fn create_s3_buckets(

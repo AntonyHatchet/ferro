@@ -1,0 +1,23 @@
+[package]
+name = "ls-gateway"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "ferro"
+path = "src/main.rs"
+
+[dependencies]
+ls-asf = { path = "../ls-asf" }
+ls-store = { path = "../ls-store" }
+ls-sqs = { path = "../ls-sqs" }
+ls-sns = { path = "../ls-sns" }
+ls-s3 = { path = "../ls-s3" }
+tokio = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+urlencoding = { workspace = true }
+bytes = { workspace = true }

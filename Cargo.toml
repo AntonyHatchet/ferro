@@ -1,0 +1,29 @@
+[workspace]
+members = [
+    "crates/ls-gateway",
+    "crates/ls-asf",
+    "crates/ls-store",
+    "crates/ls-sqs",
+    "crates/ls-sns",
+    "crates/ls-s3",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8", features = ["macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dashmap = "6"
+bytes = "1"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4.38", default-features = false, features = ["serde", "clock", "std"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+urlencoding = "2"
+md5 = "0.7"

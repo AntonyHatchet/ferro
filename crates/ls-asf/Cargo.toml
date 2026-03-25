@@ -1,0 +1,12 @@
+[package]
+name = "ls-asf"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ls-store = { path = "../ls-store" }
+serde_json = { workspace = true }
+bytes = { workspace = true }
+axum = { workspace = true }
+urlencoding = { workspace = true }
+uuid = { workspace = true }

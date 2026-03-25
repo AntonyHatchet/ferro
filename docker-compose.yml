@@ -1,0 +1,14 @@
+services:
+  ferro:
+    build: .
+    ports:
+      - "4566:4566"
+    volumes:
+      - ./init:/etc/ferro/init
+      - ferro-data:/var/lib/ferro
+    environment:
+      - AWS_DEFAULT_REGION=us-west-2
+      - AWS_ACCOUNT_ID=000000000000
+
+volumes:
+  ferro-data:

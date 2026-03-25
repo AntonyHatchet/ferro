@@ -1,0 +1,15 @@
+[package]
+name = "ls-s3"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ls-asf = { path = "../ls-asf" }
+ls-store = { path = "../ls-store" }
+serde_json = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+md5 = { workspace = true }
+urlencoding = { workspace = true }
+dashmap = { workspace = true }

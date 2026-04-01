@@ -1,6 +1,6 @@
 use axum::{
     body::Body,
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::{HeaderMap, Method, StatusCode, Uri},
     response::IntoResponse,
     routing::{any, get},
@@ -18,13 +18,19 @@ use std::sync::Arc;
 
 type AppState = Arc<ServiceRegistry>;
 
-pub fn create_router(state: AppState) -> Router {
-    Router::new()
+pub fn create_router(state: AppState, body_limit: Option<usize>) -> Router {
+    let router = Router::new()
         .route("/_ferro/health", get(health_check))
         .route("/health", get(health_check))
         .route("/{*path}", any(handle_request))
-        .route("/", any(handle_request))
-        .with_state(state)
+        .route("/", any(handle_request));
+
+    let router = match body_limit {
+        Some(limit) => router.layer(DefaultBodyLimit::max(limit)),
+        None => router.layer(DefaultBodyLimit::disable()),
+    };
+
+    router.with_state(state)
 }
 
 async fn health_check(State(registry): State<AppState>) -> impl IntoResponse {

@@ -402,6 +402,16 @@ impl SnsService {
             "      <entry><key>PendingConfirmation</key><value>{}</value></entry>\n",
             sub.pending_confirmation
         ));
+        if let Some(ref fp) = sub.filter_policy {
+            xml.push_str(&format!(
+                "      <entry><key>FilterPolicy</key><value>{}</value></entry>\n",
+                xml_escape(fp)
+            ));
+        }
+        xml.push_str(&format!(
+            "      <entry><key>FilterPolicyScope</key><value>{}</value></entry>\n",
+            sub.filter_policy_scope
+        ));
         for (k, v) in &sub.attributes {
             xml.push_str(&format!(
                 "      <entry><key>{k}</key><value>{v}</value></entry>\n"
@@ -737,6 +747,14 @@ fn param_str(params: &serde_json::Value, key: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
 fn extract_attributes(params: &serde_json::Value) -> HashMap<String, String> {
     let mut attrs = HashMap::new();
     if let Some(obj) = params.get("Attributes").and_then(|v| v.as_object()) {
@@ -757,4 +775,147 @@ fn extract_attributes(params: &serde_json::Value) -> HashMap<String, String> {
         }
     }
     attrs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ls_asf::context::RequestContext;
+    use ls_asf::service::ServiceHandler;
+
+    fn ctx(operation: &str) -> RequestContext {
+        let mut c = RequestContext::new();
+        c.service_name = "sns".to_string();
+        c.operation = operation.to_string();
+        c.region = "us-east-1".to_string();
+        c.account_id = "000000000000".to_string();
+        c
+    }
+
+    async fn create_topic(svc: &SnsService, name: &str) -> String {
+        let params = serde_json::json!({"Name": name});
+        svc.handle(ctx("CreateTopic"), params).await.unwrap();
+        format!("arn:aws:sns:us-east-1:000000000000:{name}")
+    }
+
+    async fn subscribe_sqs(svc: &SnsService, topic_arn: &str, queue_arn: &str) -> String {
+        let params = serde_json::json!({
+            "TopicArn": topic_arn,
+            "Protocol": "sqs",
+            "Endpoint": queue_arn,
+        });
+        let resp = svc.handle(ctx("Subscribe"), params).await.unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        let start = body.find("<SubscriptionArn>").unwrap() + "<SubscriptionArn>".len();
+        let end = body[start..].find("</SubscriptionArn>").unwrap();
+        body[start..start + end].to_string()
+    }
+
+    async fn set_sub_attr(svc: &SnsService, sub_arn: &str, name: &str, value: &str) {
+        let params = serde_json::json!({
+            "SubscriptionArn": sub_arn,
+            "AttributeName": name,
+            "AttributeValue": value,
+        });
+        svc.handle(ctx("SetSubscriptionAttributes"), params).await.unwrap();
+    }
+
+    async fn get_sub_attrs(svc: &SnsService, sub_arn: &str) -> String {
+        let params = serde_json::json!({"SubscriptionArn": sub_arn});
+        let resp = svc.handle(ctx("GetSubscriptionAttributes"), params).await.unwrap();
+        String::from_utf8_lossy(&resp.body).to_string()
+    }
+
+    #[tokio::test]
+    async fn set_and_get_filter_policy() {
+        let svc = SnsService::new();
+        let topic_arn = create_topic(&svc, "events").await;
+        let sub_arn = subscribe_sqs(&svc, &topic_arn, "arn:aws:sqs:us-east-1:000:queue").await;
+
+        let policy = r#"{"body":{"resourceType":["chat"]}}"#;
+        set_sub_attr(&svc, &sub_arn, "FilterPolicy", policy).await;
+
+        let attrs = get_sub_attrs(&svc, &sub_arn).await;
+        assert!(attrs.contains("<key>FilterPolicy</key>"));
+        assert!(attrs.contains("resourceType"));
+    }
+
+    #[tokio::test]
+    async fn set_and_get_filter_policy_scope() {
+        let svc = SnsService::new();
+        let topic_arn = create_topic(&svc, "scoped").await;
+        let sub_arn = subscribe_sqs(&svc, &topic_arn, "arn:aws:sqs:us-east-1:000:queue2").await;
+
+        set_sub_attr(&svc, &sub_arn, "FilterPolicyScope", "MessageBody").await;
+
+        let attrs = get_sub_attrs(&svc, &sub_arn).await;
+        assert!(attrs.contains("<key>FilterPolicyScope</key>"));
+        assert!(attrs.contains("<value>MessageBody</value>"));
+    }
+
+    #[tokio::test]
+    async fn default_filter_policy_scope_is_message_attributes() {
+        let svc = SnsService::new();
+        let topic_arn = create_topic(&svc, "defaults").await;
+        let sub_arn = subscribe_sqs(&svc, &topic_arn, "arn:aws:sqs:us-east-1:000:queue3").await;
+
+        let attrs = get_sub_attrs(&svc, &sub_arn).await;
+        assert!(attrs.contains("<key>FilterPolicyScope</key>"));
+        assert!(attrs.contains("<value>MessageAttributes</value>"));
+        assert!(!attrs.contains("<key>FilterPolicy</key>"));
+    }
+
+    #[tokio::test]
+    async fn filter_policy_with_special_chars_is_escaped() {
+        let svc = SnsService::new();
+        let topic_arn = create_topic(&svc, "escape-test").await;
+        let sub_arn = subscribe_sqs(&svc, &topic_arn, "arn:aws:sqs:us-east-1:000:queue4").await;
+
+        let policy = r#"{"key":["a","b"]}"#;
+        set_sub_attr(&svc, &sub_arn, "FilterPolicy", policy).await;
+
+        let attrs = get_sub_attrs(&svc, &sub_arn).await;
+        assert!(attrs.contains("<key>FilterPolicy</key>"));
+        assert!(attrs.contains("&quot;key&quot;"));
+    }
+
+    #[tokio::test]
+    async fn subscribe_and_set_raw_delivery() {
+        let svc = SnsService::new();
+        let topic_arn = create_topic(&svc, "raw-test").await;
+        let sub_arn = subscribe_sqs(&svc, &topic_arn, "arn:aws:sqs:us-east-1:000:queue5").await;
+
+        set_sub_attr(&svc, &sub_arn, "RawMessageDelivery", "true").await;
+
+        let attrs = get_sub_attrs(&svc, &sub_arn).await;
+        assert!(attrs.contains("<key>RawMessageDelivery</key><value>true</value>"));
+    }
+
+    #[tokio::test]
+    async fn create_topic_and_subscribe() {
+        let svc = SnsService::new();
+        let topic_arn = create_topic(&svc, "my-topic").await;
+
+        let params = serde_json::json!({
+            "TopicArn": topic_arn,
+            "Protocol": "sqs",
+            "Endpoint": "arn:aws:sqs:us-east-1:000:my-queue",
+        });
+        let resp = svc.handle(ctx("Subscribe"), params).await.unwrap();
+        assert_eq!(resp.status, 200);
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("<SubscriptionArn>"));
+    }
+
+    #[tokio::test]
+    async fn subscribe_to_nonexistent_topic_fails() {
+        let svc = SnsService::new();
+        let params = serde_json::json!({
+            "TopicArn": "arn:aws:sns:us-east-1:000:ghost",
+            "Protocol": "sqs",
+            "Endpoint": "arn:aws:sqs:us-east-1:000:queue",
+        });
+        let err = svc.handle(ctx("Subscribe"), params).await.unwrap_err();
+        assert_eq!(err.status_code, 404);
+    }
 }

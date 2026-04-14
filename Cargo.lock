@@ -512,6 +512,7 @@ dependencies = [
  "ls-store",
  "serde",
  "serde_json",
+ "tokio",
  "uuid",
 ]
 

@@ -119,6 +119,7 @@ Scripts receive these environment
 | `FERRO_INIT_DIR` | `./init` or `/etc/ferro/init` | Init scripts and config root |
 | `FERRO_INIT_CONFIG` | (auto-discovered) | Explicit path to `init.json` |
 | `FERRO_DATA_DIR` | `/var/lib/ferro` | Data directory |
+| `FERRO_MAX_BODY_SIZE` | (unlimited) | Max request body size (e.g. `256mb`, `1gb`) |
 | `AWS_DEFAULT_REGION` | `us-east-1` | Default region for init resources |
 | `AWS_ACCOUNT_ID` | `000000000000` | Default account ID |
 
@@ -525,6 +526,7 @@ services:
       - ferro-data:/var/lib/ferro
     environment:
       - AWS_DEFAULT_REGION=us-east-1
+      - FERRO_MAX_BODY_SIZE=256mb
 
   app:
     build: .

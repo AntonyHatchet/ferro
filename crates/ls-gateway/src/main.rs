@@ -45,10 +45,12 @@ async fn main() {
 
     let mut registry = ServiceRegistry::new();
     registry.register(Arc::new(ls_sqs::SqsService::new()));
-    registry.register(Arc::new(ls_sns::SnsService::new()));
+    let sns = Arc::new(ls_sns::SnsService::new());
+    registry.register(sns.clone());
     registry.register(Arc::new(ls_s3::S3Service::new()));
 
     let state = Arc::new(registry);
+    sns.set_registry(state.clone());
 
     tracing::info!("Initializing resources...");
     init::run_init_config(&state).await;

@@ -10,6 +10,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
 dashmap = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+ls-sqs = { path = "../ls-sqs" }

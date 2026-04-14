@@ -507,12 +507,15 @@ dependencies = [
 name = "ls-sns"
 version = "0.1.3"
 dependencies = [
+ "chrono",
  "dashmap",
  "ls-asf",
+ "ls-sqs",
  "ls-store",
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
  "uuid",
 ]
 

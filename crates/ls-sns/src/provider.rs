@@ -2,20 +2,26 @@ use crate::models::*;
 use ls_asf::context::RequestContext;
 use ls_asf::error::ServiceException;
 use ls_asf::serializer;
-use ls_asf::service::{HandlerFuture, ServiceHandler, ServiceResponse};
+use ls_asf::service::{HandlerFuture, ServiceHandler, ServiceRegistry, ServiceResponse};
 use ls_store::AccountRegionBundle;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 pub struct SnsService {
     stores: AccountRegionBundle<SnsStore>,
+    registry: std::sync::OnceLock<Arc<ServiceRegistry>>,
 }
 
 impl SnsService {
     pub fn new() -> Self {
         Self {
             stores: AccountRegionBundle::new(),
+            registry: std::sync::OnceLock::new(),
         }
+    }
+
+    pub fn set_registry(&self, reg: Arc<ServiceRegistry>) {
+        let _ = self.registry.set(reg);
     }
 
     fn get_store(&self, account_id: &str, region: &str) -> Arc<SnsStore> {
@@ -29,8 +35,18 @@ impl ServiceHandler for SnsService {
     }
 
     fn handle(&self, ctx: RequestContext, params: serde_json::Value) -> HandlerFuture {
-        let result = self.dispatch(ctx, params);
-        Box::pin(async move { result })
+        let result = self.dispatch(ctx.clone(), params.clone());
+        let registry = self.registry.get().cloned();
+        let stores = self.stores.clone();
+        Box::pin(async move {
+            let response = result?;
+            if matches!(ctx.operation.as_str(), "Publish" | "PublishBatch") {
+                if let Some(ref reg) = registry {
+                    fan_out(reg, &stores, &ctx, &params).await;
+                }
+            }
+            Ok(response)
+        })
     }
 }
 
@@ -402,6 +418,16 @@ impl SnsService {
             "      <entry><key>PendingConfirmation</key><value>{}</value></entry>\n",
             sub.pending_confirmation
         ));
+        if let Some(ref fp) = sub.filter_policy {
+            xml.push_str(&format!(
+                "      <entry><key>FilterPolicy</key><value>{}</value></entry>\n",
+                xml_escape(fp)
+            ));
+        }
+        xml.push_str(&format!(
+            "      <entry><key>FilterPolicyScope</key><value>{}</value></entry>\n",
+            sub.filter_policy_scope
+        ));
         for (k, v) in &sub.attributes {
             xml.push_str(&format!(
                 "      <entry><key>{k}</key><value>{v}</value></entry>\n"
@@ -737,6 +763,14 @@ fn param_str(params: &serde_json::Value, key: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
 fn extract_attributes(params: &serde_json::Value) -> HashMap<String, String> {
     let mut attrs = HashMap::new();
     if let Some(obj) = params.get("Attributes").and_then(|v| v.as_object()) {
@@ -757,4 +791,543 @@ fn extract_attributes(params: &serde_json::Value) -> HashMap<String, String> {
         }
     }
     attrs
+}
+
+async fn fan_out(
+    registry: &ServiceRegistry,
+    stores: &AccountRegionBundle<SnsStore>,
+    ctx: &RequestContext,
+    params: &serde_json::Value,
+) {
+    let sqs_handler = match registry.get("sqs") {
+        Some(h) => h,
+        None => return,
+    };
+
+    let messages = collect_publish_messages(ctx, params);
+    if messages.is_empty() {
+        return;
+    }
+
+    let store = stores.get(&ctx.account_id, &ctx.region);
+
+    for (topic_arn, message, subject, msg_attrs) in &messages {
+        let topic = match store.topics.get(topic_arn) {
+            Some(t) => t,
+            None => continue,
+        };
+
+        let sub_arns: Vec<String> = topic.subscriptions.clone();
+        drop(topic);
+
+        for sub_arn in &sub_arns {
+            let sub = match store.subscriptions.get(sub_arn) {
+                Some(s) => s.clone(),
+                None => continue,
+            };
+
+            if sub.protocol != "sqs" {
+                continue;
+            }
+
+            if let Some(ref policy) = sub.filter_policy {
+                if !crate::filter::matches(policy, &sub.filter_policy_scope, message, msg_attrs) {
+                    continue;
+                }
+            }
+
+            let body = if sub.raw_message_delivery {
+                message.clone()
+            } else {
+                build_sns_envelope(topic_arn, message, subject.as_deref())
+            };
+
+            let queue_name = match sub.endpoint.rsplit(':').next() {
+                Some(n) => n,
+                None => continue,
+            };
+            let queue_url = format!("http://internal/{}/{queue_name}", ctx.account_id);
+
+            let mut sqs_ctx = RequestContext::new();
+            sqs_ctx.service_name = "sqs".to_string();
+            sqs_ctx.operation = "SendMessage".to_string();
+            sqs_ctx.region = ctx.region.clone();
+            sqs_ctx.account_id = ctx.account_id.clone();
+            sqs_ctx
+                .headers
+                .insert("host".to_string(), "localhost:4566".to_string());
+
+            let sqs_params = serde_json::json!({
+                "QueueUrl": queue_url,
+                "MessageBody": body,
+            });
+
+            if let Err(e) = sqs_handler.handle(sqs_ctx, sqs_params).await {
+                tracing::warn!(
+                    "SNS fan-out to {} failed: {}",
+                    sub.endpoint,
+                    e.message
+                );
+            }
+        }
+    }
+}
+
+fn collect_publish_messages(
+    _ctx: &RequestContext,
+    params: &serde_json::Value,
+) -> Vec<(String, String, Option<String>, HashMap<String, MessageAttributeValue>)> {
+    let mut messages = Vec::new();
+
+    if let Some(topic_arn) = param_str(params, "TopicArn")
+        .or_else(|| param_str(params, "TargetArn"))
+    {
+        if let Some(message) = param_str(params, "Message") {
+            let subject = param_str(params, "Subject");
+            let attrs = extract_sns_message_attributes(params);
+            messages.push((topic_arn, message, subject, attrs));
+        }
+    }
+
+    if let Some(entries) = params
+        .get("PublishBatchRequestEntries")
+        .and_then(|v| v.as_array())
+    {
+        let topic_arn = param_str(params, "TopicArn").unwrap_or_default();
+        for entry in entries {
+            let message = entry
+                .get("Message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let subject = entry.get("Subject").and_then(|v| v.as_str()).map(String::from);
+            let attrs = extract_sns_message_attributes(entry);
+            messages.push((topic_arn.clone(), message, subject, attrs));
+        }
+    }
+
+    messages
+}
+
+fn extract_sns_message_attributes(
+    params: &serde_json::Value,
+) -> HashMap<String, MessageAttributeValue> {
+    let mut attrs = HashMap::new();
+    if let Some(obj) = params.get("MessageAttributes").and_then(|v| v.as_object()) {
+        for (k, v) in obj {
+            if let Some(dt) = v.get("DataType").and_then(|d| d.as_str()) {
+                attrs.insert(
+                    k.clone(),
+                    MessageAttributeValue {
+                        data_type: dt.to_string(),
+                        string_value: v
+                            .get("StringValue")
+                            .and_then(|s| s.as_str())
+                            .map(|s| s.to_string()),
+                        binary_value: None,
+                    },
+                );
+            }
+        }
+    }
+    for i in 1..=30 {
+        let name_key = format!("MessageAttributes.entry.{i}.Name");
+        let type_key = format!("MessageAttributes.entry.{i}.Value.DataType");
+        let str_key = format!("MessageAttributes.entry.{i}.Value.StringValue");
+        if let (Some(name), Some(dt)) =
+            (param_str(params, &name_key), param_str(params, &type_key))
+        {
+            attrs.insert(
+                name,
+                MessageAttributeValue {
+                    data_type: dt,
+                    string_value: param_str(params, &str_key),
+                    binary_value: None,
+                },
+            );
+        } else {
+            break;
+        }
+    }
+    attrs
+}
+
+fn build_sns_envelope(topic_arn: &str, message: &str, subject: Option<&str>) -> String {
+    let message_id = uuid::Uuid::new_v4().to_string();
+    let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let mut envelope = serde_json::json!({
+        "Type": "Notification",
+        "MessageId": message_id,
+        "TopicArn": topic_arn,
+        "Message": message,
+        "Timestamp": timestamp,
+        "UnsubscribeURL": format!(
+            "http://localhost:4566/?Action=Unsubscribe&SubscriptionArn={}",
+            topic_arn
+        ),
+    });
+    if let Some(s) = subject {
+        envelope["Subject"] = serde_json::Value::String(s.to_string());
+    }
+    envelope.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ls_asf::context::RequestContext;
+    use ls_asf::service::ServiceHandler;
+
+    fn ctx(operation: &str) -> RequestContext {
+        let mut c = RequestContext::new();
+        c.service_name = "sns".to_string();
+        c.operation = operation.to_string();
+        c.region = "us-east-1".to_string();
+        c.account_id = "000000000000".to_string();
+        c
+    }
+
+    async fn create_topic(svc: &SnsService, name: &str) -> String {
+        let params = serde_json::json!({"Name": name});
+        svc.handle(ctx("CreateTopic"), params).await.unwrap();
+        format!("arn:aws:sns:us-east-1:000000000000:{name}")
+    }
+
+    async fn subscribe_sqs(svc: &SnsService, topic_arn: &str, queue_arn: &str) -> String {
+        let params = serde_json::json!({
+            "TopicArn": topic_arn,
+            "Protocol": "sqs",
+            "Endpoint": queue_arn,
+        });
+        let resp = svc.handle(ctx("Subscribe"), params).await.unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        let start = body.find("<SubscriptionArn>").unwrap() + "<SubscriptionArn>".len();
+        let end = body[start..].find("</SubscriptionArn>").unwrap();
+        body[start..start + end].to_string()
+    }
+
+    async fn set_sub_attr(svc: &SnsService, sub_arn: &str, name: &str, value: &str) {
+        let params = serde_json::json!({
+            "SubscriptionArn": sub_arn,
+            "AttributeName": name,
+            "AttributeValue": value,
+        });
+        svc.handle(ctx("SetSubscriptionAttributes"), params).await.unwrap();
+    }
+
+    async fn get_sub_attrs(svc: &SnsService, sub_arn: &str) -> String {
+        let params = serde_json::json!({"SubscriptionArn": sub_arn});
+        let resp = svc.handle(ctx("GetSubscriptionAttributes"), params).await.unwrap();
+        String::from_utf8_lossy(&resp.body).to_string()
+    }
+
+    #[tokio::test]
+    async fn set_and_get_filter_policy() {
+        let svc = SnsService::new();
+        let topic_arn = create_topic(&svc, "events").await;
+        let sub_arn = subscribe_sqs(&svc, &topic_arn, "arn:aws:sqs:us-east-1:000:queue").await;
+
+        let policy = r#"{"body":{"resourceType":["chat"]}}"#;
+        set_sub_attr(&svc, &sub_arn, "FilterPolicy", policy).await;
+
+        let attrs = get_sub_attrs(&svc, &sub_arn).await;
+        assert!(attrs.contains("<key>FilterPolicy</key>"));
+        assert!(attrs.contains("resourceType"));
+    }
+
+    #[tokio::test]
+    async fn set_and_get_filter_policy_scope() {
+        let svc = SnsService::new();
+        let topic_arn = create_topic(&svc, "scoped").await;
+        let sub_arn = subscribe_sqs(&svc, &topic_arn, "arn:aws:sqs:us-east-1:000:queue2").await;
+
+        set_sub_attr(&svc, &sub_arn, "FilterPolicyScope", "MessageBody").await;
+
+        let attrs = get_sub_attrs(&svc, &sub_arn).await;
+        assert!(attrs.contains("<key>FilterPolicyScope</key>"));
+        assert!(attrs.contains("<value>MessageBody</value>"));
+    }
+
+    #[tokio::test]
+    async fn default_filter_policy_scope_is_message_attributes() {
+        let svc = SnsService::new();
+        let topic_arn = create_topic(&svc, "defaults").await;
+        let sub_arn = subscribe_sqs(&svc, &topic_arn, "arn:aws:sqs:us-east-1:000:queue3").await;
+
+        let attrs = get_sub_attrs(&svc, &sub_arn).await;
+        assert!(attrs.contains("<key>FilterPolicyScope</key>"));
+        assert!(attrs.contains("<value>MessageAttributes</value>"));
+        assert!(!attrs.contains("<key>FilterPolicy</key>"));
+    }
+
+    #[tokio::test]
+    async fn filter_policy_with_special_chars_is_escaped() {
+        let svc = SnsService::new();
+        let topic_arn = create_topic(&svc, "escape-test").await;
+        let sub_arn = subscribe_sqs(&svc, &topic_arn, "arn:aws:sqs:us-east-1:000:queue4").await;
+
+        let policy = r#"{"key":["a","b"]}"#;
+        set_sub_attr(&svc, &sub_arn, "FilterPolicy", policy).await;
+
+        let attrs = get_sub_attrs(&svc, &sub_arn).await;
+        assert!(attrs.contains("<key>FilterPolicy</key>"));
+        assert!(attrs.contains("&quot;key&quot;"));
+    }
+
+    #[tokio::test]
+    async fn subscribe_and_set_raw_delivery() {
+        let svc = SnsService::new();
+        let topic_arn = create_topic(&svc, "raw-test").await;
+        let sub_arn = subscribe_sqs(&svc, &topic_arn, "arn:aws:sqs:us-east-1:000:queue5").await;
+
+        set_sub_attr(&svc, &sub_arn, "RawMessageDelivery", "true").await;
+
+        let attrs = get_sub_attrs(&svc, &sub_arn).await;
+        assert!(attrs.contains("<key>RawMessageDelivery</key><value>true</value>"));
+    }
+
+    #[tokio::test]
+    async fn create_topic_and_subscribe() {
+        let svc = SnsService::new();
+        let topic_arn = create_topic(&svc, "my-topic").await;
+
+        let params = serde_json::json!({
+            "TopicArn": topic_arn,
+            "Protocol": "sqs",
+            "Endpoint": "arn:aws:sqs:us-east-1:000:my-queue",
+        });
+        let resp = svc.handle(ctx("Subscribe"), params).await.unwrap();
+        assert_eq!(resp.status, 200);
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("<SubscriptionArn>"));
+    }
+
+    #[tokio::test]
+    async fn subscribe_to_nonexistent_topic_fails() {
+        let svc = SnsService::new();
+        let params = serde_json::json!({
+            "TopicArn": "arn:aws:sns:us-east-1:000:ghost",
+            "Protocol": "sqs",
+            "Endpoint": "arn:aws:sqs:us-east-1:000:queue",
+        });
+        let err = svc.handle(ctx("Subscribe"), params).await.unwrap_err();
+        assert_eq!(err.status_code, 404);
+    }
+
+    fn sqs_ctx(operation: &str) -> RequestContext {
+        let mut c = RequestContext::new();
+        c.service_name = "sqs".to_string();
+        c.operation = operation.to_string();
+        c.region = "us-east-1".to_string();
+        c.account_id = "000000000000".to_string();
+        c.headers
+            .insert("host".to_string(), "localhost:4566".to_string());
+        c
+    }
+
+    fn build_registry() -> (Arc<SnsService>, Arc<ServiceRegistry>) {
+        let mut registry = ServiceRegistry::new();
+        registry.register(Arc::new(ls_sqs::SqsService::new()));
+        let sns = Arc::new(SnsService::new());
+        registry.register(sns.clone());
+        let reg = Arc::new(registry);
+        sns.set_registry(reg.clone());
+        (sns, reg)
+    }
+
+    async fn create_sqs_queue(registry: &ServiceRegistry, name: &str) {
+        let sqs = registry.get("sqs").unwrap();
+        let params = serde_json::json!({"QueueName": name});
+        sqs.handle(sqs_ctx("CreateQueue"), params).await.unwrap();
+    }
+
+    async fn receive_sqs_message(registry: &ServiceRegistry, queue_name: &str) -> Option<String> {
+        let sqs = registry.get("sqs").unwrap();
+        let params = serde_json::json!({
+            "QueueUrl": format!("http://localhost:4566/000000000000/{queue_name}"),
+            "MaxNumberOfMessages": "1",
+        });
+        let resp = sqs
+            .handle(sqs_ctx("ReceiveMessage"), params)
+            .await
+            .unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        if body.contains("<Body>") {
+            let start = body.find("<Body>").unwrap() + "<Body>".len();
+            let end = body[start..].find("</Body>").unwrap();
+            Some(body[start..start + end].to_string())
+        } else {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn publish_fans_out_to_sqs() {
+        let (sns, reg) = build_registry();
+        create_sqs_queue(&reg, "fanout-q").await;
+        let topic_arn = create_topic(&sns, "fanout-topic").await;
+        subscribe_sqs(
+            &sns,
+            &topic_arn,
+            "arn:aws:sqs:us-east-1:000000000000:fanout-q",
+        )
+        .await;
+
+        let params = serde_json::json!({
+            "TopicArn": topic_arn,
+            "Message": "hello from sns",
+        });
+        sns.handle(ctx("Publish"), params).await.unwrap();
+
+        let msg = receive_sqs_message(&reg, "fanout-q").await;
+        assert!(msg.is_some());
+        let body = msg.unwrap();
+        assert!(body.contains("hello from sns"));
+    }
+
+    #[tokio::test]
+    async fn publish_raw_delivery_sends_raw_body() {
+        let (sns, reg) = build_registry();
+        create_sqs_queue(&reg, "raw-q").await;
+        let topic_arn = create_topic(&sns, "raw-topic").await;
+        let sub_arn = subscribe_sqs(
+            &sns,
+            &topic_arn,
+            "arn:aws:sqs:us-east-1:000000000000:raw-q",
+        )
+        .await;
+        set_sub_attr(&sns, &sub_arn, "RawMessageDelivery", "true").await;
+
+        let params = serde_json::json!({
+            "TopicArn": topic_arn,
+            "Message": "raw-body-content",
+        });
+        sns.handle(ctx("Publish"), params).await.unwrap();
+
+        let msg = receive_sqs_message(&reg, "raw-q").await.unwrap();
+        assert_eq!(msg, "raw-body-content");
+    }
+
+    #[tokio::test]
+    async fn publish_envelope_wraps_message() {
+        let (sns, reg) = build_registry();
+        create_sqs_queue(&reg, "env-q").await;
+        let topic_arn = create_topic(&sns, "env-topic").await;
+        subscribe_sqs(
+            &sns,
+            &topic_arn,
+            "arn:aws:sqs:us-east-1:000000000000:env-q",
+        )
+        .await;
+
+        let params = serde_json::json!({
+            "TopicArn": topic_arn,
+            "Message": "wrapped-msg",
+            "Subject": "test-subject",
+        });
+        sns.handle(ctx("Publish"), params).await.unwrap();
+
+        let msg = receive_sqs_message(&reg, "env-q").await.unwrap();
+        assert!(msg.contains("Notification"));
+        assert!(msg.contains("wrapped-msg"));
+        assert!(msg.contains("test-subject"));
+        assert!(msg.contains("TopicArn"));
+    }
+
+    #[tokio::test]
+    async fn publish_with_filter_policy_matching() {
+        let (sns, reg) = build_registry();
+        create_sqs_queue(&reg, "filter-match-q").await;
+        let topic_arn = create_topic(&sns, "filter-topic").await;
+        let sub_arn = subscribe_sqs(
+            &sns,
+            &topic_arn,
+            "arn:aws:sqs:us-east-1:000000000000:filter-match-q",
+        )
+        .await;
+        set_sub_attr(
+            &sns,
+            &sub_arn,
+            "FilterPolicy",
+            r#"{"body":{"resourceType":["chat"]}}"#,
+        )
+        .await;
+        set_sub_attr(&sns, &sub_arn, "FilterPolicyScope", "MessageBody").await;
+        set_sub_attr(&sns, &sub_arn, "RawMessageDelivery", "true").await;
+
+        let params = serde_json::json!({
+            "TopicArn": topic_arn,
+            "Message": r#"{"body":{"resourceType":"chat","id":"1"}}"#,
+        });
+        sns.handle(ctx("Publish"), params).await.unwrap();
+
+        let msg = receive_sqs_message(&reg, "filter-match-q").await;
+        assert!(msg.is_some());
+    }
+
+    #[tokio::test]
+    async fn publish_with_filter_policy_not_matching() {
+        let (sns, reg) = build_registry();
+        create_sqs_queue(&reg, "filter-nomatch-q").await;
+        let topic_arn = create_topic(&sns, "filter-nm-topic").await;
+        let sub_arn = subscribe_sqs(
+            &sns,
+            &topic_arn,
+            "arn:aws:sqs:us-east-1:000000000000:filter-nomatch-q",
+        )
+        .await;
+        set_sub_attr(
+            &sns,
+            &sub_arn,
+            "FilterPolicy",
+            r#"{"body":{"resourceType":["chat"]}}"#,
+        )
+        .await;
+        set_sub_attr(&sns, &sub_arn, "FilterPolicyScope", "MessageBody").await;
+
+        let params = serde_json::json!({
+            "TopicArn": topic_arn,
+            "Message": r#"{"body":{"resourceType":"email","id":"2"}}"#,
+        });
+        sns.handle(ctx("Publish"), params).await.unwrap();
+
+        let msg = receive_sqs_message(&reg, "filter-nomatch-q").await;
+        assert!(msg.is_none());
+    }
+
+    #[tokio::test]
+    async fn publish_batch_fans_out_each_entry() {
+        let (sns, reg) = build_registry();
+        create_sqs_queue(&reg, "batch-q").await;
+        let topic_arn = create_topic(&sns, "batch-topic").await;
+        let sub_arn = subscribe_sqs(
+            &sns,
+            &topic_arn,
+            "arn:aws:sqs:us-east-1:000000000000:batch-q",
+        )
+        .await;
+        set_sub_attr(&sns, &sub_arn, "RawMessageDelivery", "true").await;
+
+        let params = serde_json::json!({
+            "TopicArn": topic_arn,
+            "PublishBatchRequestEntries": [
+                {"Id": "1", "Message": "batch-msg-1"},
+                {"Id": "2", "Message": "batch-msg-2"},
+            ],
+        });
+        sns.handle(ctx("PublishBatch"), params).await.unwrap();
+
+        let sqs = reg.get("sqs").unwrap();
+        let recv_params = serde_json::json!({
+            "QueueUrl": "http://localhost:4566/000000000000/batch-q",
+            "MaxNumberOfMessages": "10",
+        });
+        let resp = sqs
+            .handle(sqs_ctx("ReceiveMessage"), recv_params)
+            .await
+            .unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("batch-msg-1"));
+        assert!(body.contains("batch-msg-2"));
+    }
 }

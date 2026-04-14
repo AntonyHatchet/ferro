@@ -64,6 +64,17 @@ Place an `init.json` file in the init directory (default: `./init/` or `/etc/fer
       ]
     },
     {
+      "name": "audit_log_created",
+      "subscriptions": [
+        {
+          "protocol": "sqs",
+          "endpoint": "arn:aws:sqs:us-east-1:000000000000:audit-log-chat-queue",
+          "filter_policy": "{\"body\":{\"resourceType\":[\"chat\"]}}",
+          "filter_policy_scope": "MessageBody"
+        }
+      ]
+    },
+    {
       "name": "alerts"
     }
   ],
@@ -85,7 +96,10 @@ Place an `init.json` file in the init directory (default: `./init/` or `/etc/fer
 }
 ```
 
-SNS subscriptions support `raw_message_delivery` (default: `false`). When `true`, SNS delivers the raw message to SQS without wrapping it in the SNS envelope JSON. Set this for any SQS consumer that expects the original message body.
+SNS subscriptions support the following optional fields:
+- `raw_message_delivery` (default: `false`) — when `true`, SNS delivers the raw message to SQS without wrapping it in the SNS envelope JSON. Set this for any SQS consumer that expects the original message body.
+- `filter_policy` — a JSON string defining an SNS filter policy. Only messages matching the policy are delivered to this subscription (e.g. `"{\"body\":{\"resourceType\":[\"chat\"]}}"`).
+- `filter_policy_scope` — either `"MessageAttributes"` (default) or `"MessageBody"`. Controls whether the filter policy is evaluated against message attributes or the message body.
 
 S3 buckets support `seed_dir` to upload an entire directory tree at boot.
 

@@ -38,6 +38,10 @@ pub struct SnsSubscriptionInit {
     pub endpoint: String,
     #[serde(default)]
     pub raw_message_delivery: bool,
+    #[serde(default)]
+    pub filter_policy: Option<String>,
+    #[serde(default)]
+    pub filter_policy_scope: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -296,7 +300,7 @@ async fn create_sns_topics(
                 .await;
 
             match sub_response {
-                Ok(ref resp) if sub.raw_message_delivery => {
+                Ok(ref resp) => {
                     tracing::info!(
                         "  [sns] Subscribed {} -> {}:{}",
                         t.name,
@@ -304,48 +308,65 @@ async fn create_sns_topics(
                         sub.endpoint
                     );
 
-                    if let Some(sub_arn) = extract_subscription_arn(&resp.body) {
-                        let mut attr_ctx = RequestContext::new();
-                        attr_ctx.service_name = "sns".to_string();
-                        attr_ctx.operation = "SetSubscriptionAttributes".to_string();
-                        attr_ctx.region = region.to_string();
-                        attr_ctx.account_id = account.to_string();
+                    let needs_attrs = sub.raw_message_delivery
+                        || sub.filter_policy.is_some()
+                        || sub.filter_policy_scope.is_some();
 
-                        let mut attr_params = serde_json::Map::new();
-                        attr_params.insert(
-                            "SubscriptionArn".to_string(),
-                            serde_json::Value::String(sub_arn.clone()),
-                        );
-                        attr_params.insert(
-                            "AttributeName".to_string(),
-                            serde_json::Value::String("RawMessageDelivery".to_string()),
-                        );
-                        attr_params.insert(
-                            "AttributeValue".to_string(),
-                            serde_json::Value::String("true".to_string()),
-                        );
+                    if needs_attrs {
+                        if let Some(sub_arn) = extract_subscription_arn(&resp.body) {
+                            let mut attrs: Vec<(&str, String)> = Vec::new();
 
-                        match handler
-                            .handle(attr_ctx, serde_json::Value::Object(attr_params))
-                            .await
-                        {
-                            Ok(_) => tracing::info!(
-                                "  [sns] Set RawMessageDelivery=true on {}",
-                                sub_arn
-                            ),
-                            Err(e) => tracing::error!(
-                                "  [sns] Failed to set RawMessageDelivery on {}: {e}",
-                                sub_arn
-                            ),
+                            if sub.raw_message_delivery {
+                                attrs.push(("RawMessageDelivery", "true".to_string()));
+                            }
+                            if let Some(ref fp) = sub.filter_policy {
+                                attrs.push(("FilterPolicy", fp.clone()));
+                            }
+                            if let Some(ref scope) = sub.filter_policy_scope {
+                                attrs.push(("FilterPolicyScope", scope.clone()));
+                            }
+
+                            for (attr_name, attr_value) in &attrs {
+                                let mut attr_ctx = RequestContext::new();
+                                attr_ctx.service_name = "sns".to_string();
+                                attr_ctx.operation = "SetSubscriptionAttributes".to_string();
+                                attr_ctx.region = region.to_string();
+                                attr_ctx.account_id = account.to_string();
+
+                                let mut attr_params = serde_json::Map::new();
+                                attr_params.insert(
+                                    "SubscriptionArn".to_string(),
+                                    serde_json::Value::String(sub_arn.clone()),
+                                );
+                                attr_params.insert(
+                                    "AttributeName".to_string(),
+                                    serde_json::Value::String(attr_name.to_string()),
+                                );
+                                attr_params.insert(
+                                    "AttributeValue".to_string(),
+                                    serde_json::Value::String(attr_value.clone()),
+                                );
+
+                                match handler
+                                    .handle(attr_ctx, serde_json::Value::Object(attr_params))
+                                    .await
+                                {
+                                    Ok(_) => tracing::info!(
+                                        "  [sns] Set {}={} on {}",
+                                        attr_name,
+                                        attr_value,
+                                        sub_arn
+                                    ),
+                                    Err(e) => tracing::error!(
+                                        "  [sns] Failed to set {} on {}: {e}",
+                                        attr_name,
+                                        sub_arn
+                                    ),
+                                }
+                            }
                         }
                     }
                 }
-                Ok(_) => tracing::info!(
-                    "  [sns] Subscribed {} -> {}:{}",
-                    t.name,
-                    sub.protocol,
-                    sub.endpoint
-                ),
                 Err(e) => tracing::error!("  [sns] Failed to subscribe to {}: {e}", t.name),
             }
         }
@@ -677,4 +698,103 @@ fn is_executable(path: &Path) -> bool {
 #[cfg(not(unix))]
 fn is_executable(_path: &Path) -> bool {
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deserialize_subscription_with_filter_policy() {
+        let json = r#"{
+            "protocol": "sqs",
+            "endpoint": "arn:aws:sqs:us-east-1:000:queue",
+            "filter_policy": "{\"body\":{\"resourceType\":[\"chat\"]}}",
+            "filter_policy_scope": "MessageBody"
+        }"#;
+        let sub: SnsSubscriptionInit = serde_json::from_str(json).unwrap();
+        assert_eq!(sub.protocol, "sqs");
+        assert_eq!(sub.filter_policy.as_deref(), Some(r#"{"body":{"resourceType":["chat"]}}"#));
+        assert_eq!(sub.filter_policy_scope.as_deref(), Some("MessageBody"));
+        assert!(!sub.raw_message_delivery);
+    }
+
+    #[test]
+    fn deserialize_subscription_without_filter_policy() {
+        let json = r#"{
+            "protocol": "sqs",
+            "endpoint": "arn:aws:sqs:us-east-1:000:queue",
+            "raw_message_delivery": true
+        }"#;
+        let sub: SnsSubscriptionInit = serde_json::from_str(json).unwrap();
+        assert!(sub.raw_message_delivery);
+        assert!(sub.filter_policy.is_none());
+        assert!(sub.filter_policy_scope.is_none());
+    }
+
+    #[test]
+    fn deserialize_subscription_minimal() {
+        let json = r#"{"protocol": "sqs", "endpoint": "arn:aws:sqs:us-east-1:000:queue"}"#;
+        let sub: SnsSubscriptionInit = serde_json::from_str(json).unwrap();
+        assert!(!sub.raw_message_delivery);
+        assert!(sub.filter_policy.is_none());
+        assert!(sub.filter_policy_scope.is_none());
+    }
+
+    #[test]
+    fn deserialize_subscription_filter_policy_only() {
+        let json = r#"{
+            "protocol": "sqs",
+            "endpoint": "arn:aws:sqs:us-east-1:000:queue",
+            "filter_policy": "{\"status\":[\"active\"]}"
+        }"#;
+        let sub: SnsSubscriptionInit = serde_json::from_str(json).unwrap();
+        assert_eq!(sub.filter_policy.as_deref(), Some(r#"{"status":["active"]}"#));
+        assert!(sub.filter_policy_scope.is_none());
+    }
+
+    #[test]
+    fn deserialize_full_init_config_with_filter_policies() {
+        let json = r#"{
+            "sns": [
+                {
+                    "name": "audit_log_created",
+                    "subscriptions": [
+                        {
+                            "protocol": "sqs",
+                            "endpoint": "arn:aws:sqs:us-east-1:000:audit-chat",
+                            "filter_policy": "{\"body\":{\"resourceType\":[\"chat\"]}}",
+                            "filter_policy_scope": "MessageBody"
+                        },
+                        {
+                            "protocol": "sqs",
+                            "endpoint": "arn:aws:sqs:us-east-1:000:audit-all"
+                        }
+                    ]
+                },
+                {
+                    "name": "alerts"
+                }
+            ]
+        }"#;
+        let config: InitConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.sns.len(), 2);
+        assert_eq!(config.sns[0].subscriptions.len(), 2);
+        assert!(config.sns[0].subscriptions[0].filter_policy.is_some());
+        assert!(config.sns[0].subscriptions[1].filter_policy.is_none());
+        assert_eq!(config.sns[1].subscriptions.len(), 0);
+    }
+
+    #[test]
+    fn extract_subscription_arn_from_xml() {
+        let xml = b"<SubscribeResponse><SubscribeResult><SubscriptionArn>arn:aws:sns:us-east-1:000:topic:sub-id</SubscriptionArn></SubscribeResult></SubscribeResponse>";
+        let arn = extract_subscription_arn(xml).unwrap();
+        assert_eq!(arn, "arn:aws:sns:us-east-1:000:topic:sub-id");
+    }
+
+    #[test]
+    fn extract_subscription_arn_missing() {
+        let xml = b"<SubscribeResponse><SubscribeResult></SubscribeResult></SubscribeResponse>";
+        assert!(extract_subscription_arn(xml).is_none());
+    }
 }

@@ -1,6 +1,6 @@
 services:
   ferro:
-    image: ferro:0.1.2
+    image: ferro:0.1.3
     ports:
       - "4566:4566"
     volumes:

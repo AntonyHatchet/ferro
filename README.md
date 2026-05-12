@@ -6,12 +6,15 @@ Lightweight AWS service emulator for local development and testing, written in R
   <img src="https://github.com/user-attachments/assets/37bbc9ad-5fab-490a-8a21-fb2d95e54169" alt="Ferro banner" width="100%" />
 </p>
 <p align="center">
-  <a href="https://github.com/AntonyHatchet/ferro/actions">
-    <img src="https://img.shields.io/github/actions/workflow/status/AntonyHatchet/ferro/ci.yml?style=flat-square" />
+  <a href="https://github.com/AntonyHatchet/ferro/actions/workflows/rust.yml">
+    <img src="https://img.shields.io/github/actions/workflow/status/AntonyHatchet/ferro/rust.yml?branch=main&style=flat-square" alt="Build status" />
   </a>
-  <img src="https://img.shields.io/docker/image-size/ghcr.io/antonyhatchet/ferro/latest?style=flat-square" />
-  <img src="https://img.shields.io/github/license/AntonyHatchet/ferro?style=flat-square" />
-  <img src="https://img.shields.io/github/stars/AntonyHatchet/ferro?style=flat-square" />
+  <a href="https://github.com/AntonyHatchet/ferro/blob/main/LICENSE">
+    <img src="https://img.shields.io/github/license/AntonyHatchet/ferro?style=flat-square" alt="License" />
+  </a>
+  <a href="https://github.com/AntonyHatchet/ferro/stargazers">
+    <img src="https://img.shields.io/github/stars/AntonyHatchet/ferro?style=flat-square" alt="GitHub stars" />
+  </a>
 </p>
 <p align="center">
   <strong>⚡ Instant startup</strong>
@@ -333,4 +336,6 @@ If you find compatibility issues with AWS SDKs or APIs, open an issue with:
 
 ## License
 
-MIT
+Apache-2.0
+
+Ferro began as a fork of LocalStack and has since been rewritten from scratch in Rust. It is not affiliated with LocalStack, Inc.

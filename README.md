@@ -1,4 +1,4 @@
-Ferro — SQS, SNS, S3
+# Ferro — SQS, SNS, S3
 
 Lightweight AWS service emulator for local development and testing, written in Rust.
 
@@ -15,178 +15,202 @@ Lightweight AWS service emulator for local development and testing, written in R
 </p>
 <p align="center">
   <strong>⚡ Instant startup</strong>
-  ·
+  &nbsp;·&nbsp;
   <strong>📦 17 MB Docker image</strong>
-  ·
+  &nbsp;·&nbsp;
   <strong>🦀 Written in Rust</strong>
-  ·
+  &nbsp;·&nbsp;
   <strong>🔌 AWS SDK compatible</strong>
 </p>
 
-⸻
+---
 
-Why Ferro?
+## Why Ferro?
 
 Ferro is designed for developers who want:
 
-* ⚡ Instant startup
-* 📦 Tiny Docker images
-* 🧪 Fast local integration testing
-* 🔌 AWS SDK compatibility
-* 🐳 Docker-first workflows
-* 💨 Minimal resource usage
+- ⚡ Instant startup
+- 📦 Tiny Docker images
+- 🧪 Fast local integration testing
+- 🔌 AWS SDK compatibility
+- 🐳 Docker-first workflows
+- 💨 Minimal resource usage
 
-Unlike heavyweight cloud emulators, Ferro focuses on:
+Unlike heavyweight cloud emulators, Ferro focuses on speed, simplicity, and developer experience.
 
-* speed
-* simplicity
-* developer experience
+---
 
-⸻
+## Features
 
-Features
+| Feature | Description |
+|---|---|
+| ⚡ Instant startup | Starts in milliseconds |
+| 📦 Tiny image | ~17 MB Docker image |
+| 🦀 Rust-powered | Fast and memory efficient |
+| 🔌 AWS compatible | Works with AWS SDKs & CLI |
+| 🧪 CI-friendly | Perfect for integration testing |
+| 🐳 Docker-first | Easy local environments |
 
-Feature	Description
-⚡ Instant startup	Starts in milliseconds
-📦 Tiny image	~17 MB Docker image
-🦀 Rust-powered	Fast and memory efficient
-🔌 AWS compatible	Works with AWS SDKs & CLI
-🧪 CI-friendly	Perfect for integration testing
-🐳 Docker-first	Easy local environments
+---
 
-⸻
+## Supported Services
 
-Supported Services
+| Service | Operations | Protocol |
+|---|---|---|
+| SQS | 23+ operations | query + json |
+| SNS | 42+ operations | query |
+| S3 | ~80 operations | rest-xml |
 
-Service	Operations	Protocol
-SQS	23+ operations	query + json
-SNS	42+ operations	query
-S3	~80 operations	rest-xml
+---
 
-⸻
+## Quick Start
 
-Quick Start
+### Docker (Recommended)
 
-Docker (Recommended)
-
+```sh
 docker run --rm \
   -p 4566:4566 \
   ghcr.io/antonyhatchet/ferro:latest
+```
 
-Ferro listens on:
+Ferro listens on `http://localhost:4566`.
 
-http://localhost:4566
+### Cargo
 
-⸻
-
-Cargo
-
+```sh
 cargo run --bin ferro
+```
 
 Override the port:
 
+```sh
 GATEWAY_LISTEN=:4577 cargo run --bin ferro
+```
 
-⸻
+---
 
-Golden Path Example
+## Golden Path Example
 
-The fastest way to get started:
-
+```sh
 docker run -p 4566:4566 ghcr.io/antonyhatchet/ferro:latest
+
 export AWS_ENDPOINT_URL=http://localhost:4566
+
 aws sqs create-queue --queue-name jobs
+
 aws sqs send-message \
   --queue-url http://localhost:4566/000000000000/jobs \
   --message-body 'hello world'
+
 aws sqs receive-message \
   --queue-url http://localhost:4566/000000000000/jobs
+```
 
-⸻
+---
 
-Architecture
+## Architecture
 
+```
  AWS SDK / CLI
-        │
-        ▼
-    Ferro Gateway
-   ┌────┼────┐
-   ▼    ▼    ▼
-  SQS  SNS   S3
+       │
+       ▼
+  Ferro Gateway
+ ┌─────┼─────┐
+ ▼     ▼     ▼
+SQS   SNS    S3
+```
 
-⸻
+---
 
-Designed For
+## Designed For
 
-* Local integration testing
-* Docker Compose stacks
-* Event-driven applications
-* Queue-based architectures
-* Offline development
-* CI pipelines
-* AWS SDK development
+- Local integration testing
+- Docker Compose stacks
+- Event-driven applications
+- Queue-based architectures
+- Offline development
+- CI pipelines
+- AWS SDK development
 
-⸻
+---
 
-Example Workflows
+## Example Workflows
 
 <details>
 <summary>SQS Examples</summary>
+
+```sh
 export AWS_ENDPOINT_URL=http://localhost:4566
+
 # Create queue
 aws sqs create-queue --queue-name orders
+
 # Send message
 aws sqs send-message \
   --queue-url http://localhost:4566/000000000000/orders \
   --message-body '{"orderId":"123"}'
+
 # Receive messages
 aws sqs receive-message \
   --queue-url http://localhost:4566/000000000000/orders
+```
+
 </details>
+
 <details>
 <summary>SNS → SQS Fan-Out</summary>
+
+```sh
 # Create queue
 aws sqs create-queue --queue-name email-notifications
+
 # Create topic
 aws sns create-topic --name user-events
-# Subscribe queue
+
+# Subscribe queue to topic
 aws sns subscribe \
   --topic-arn arn:aws:sns:us-east-1:000000000000:user-events \
   --protocol sqs \
   --notification-endpoint arn:aws:sqs:us-east-1:000000000000:email-notifications
+```
+
 </details>
+
 <details>
 <summary>S3 Examples</summary>
+
+```sh
 export AWS_ENDPOINT_URL=http://localhost:4566
+
 # Create bucket
 aws s3 mb s3://my-app
+
 # Upload file
 aws s3 cp README.md s3://my-app/docs/readme.md
+
 # List objects
 aws s3 ls s3://my-app/
+```
+
 </details>
 
-⸻
+---
 
-Initialization
+## Initialization
 
-Resources can be pre-created during startup using:
+Resources can be pre-created during startup using an `init.json` file and `ready.d/` scripts.
 
-* init.json
-* ready.d/ scripts
-
-Example:
-
+```
 init/
 ├── init.json
 └── ready.d/
     ├── 01-setup.sh
     └── 02-seed.py
+```
 
-⸻
+### `init.json`
 
-Example init.json
-
+```json
 {
   "sqs": [
     { "name": "orders" },
@@ -199,11 +223,13 @@ Example init.json
     { "name": "uploads", "versioning": true }
   ]
 }
+```
 
-⸻
+---
 
-Docker Compose
+## Docker Compose
 
+```yaml
 version: "3.8"
 services:
   ferro:
@@ -213,46 +239,55 @@ services:
     volumes:
       - ./init:/etc/ferro/init
       - ferro-data:/var/lib/ferro
+
 volumes:
   ferro-data:
+```
 
-⸻
+---
 
-Environment Variables
+## Environment Variables
 
-Variable	Default	Purpose
-GATEWAY_LISTEN	:4566	Server listen address
-FERRO_LOG	info	Log level
-FERRO_INIT_DIR	./init	Init config directory
-FERRO_DATA_DIR	/var/lib/ferro	Persistent data
-AWS_DEFAULT_REGION	us-east-1	AWS region
+| Variable | Default | Purpose |
+|---|---|---|
+| `GATEWAY_LISTEN` | `:4566` | Server listen address |
+| `FERRO_LOG` | `info` | Log level |
+| `FERRO_INIT_DIR` | `./init` | Init config directory |
+| `FERRO_DATA_DIR` | `/var/lib/ferro` | Persistent data |
+| `AWS_DEFAULT_REGION` | `us-east-1` | AWS region |
 
-⸻
+---
 
-Logging
+## Logging
 
+```sh
 # Default
 FERRO_LOG=info
+
 # Debug S3 only
 FERRO_LOG=warn,ferro::s3=debug
+
 # Silence SQS polling
 FERRO_LOG=info,ferro::sqs=warn
+```
 
-⸻
+---
 
-Comparison
+## Comparison
 
-	Ferro	LocalStack
-Startup speed	⚡ Instant	Slower
-Docker size	~17 MB	Large
-Focus	SQS/SNS/S3	Full AWS
-Memory usage	Low	Higher
-Language	Rust	Python
+| | Ferro | LocalStack |
+|---|---|---|
+| Startup speed | ⚡ Instant | Slower |
+| Docker size | ~17 MB | Large |
+| Focus | SQS / SNS / S3 | Full AWS |
+| Memory usage | Low | Higher |
+| Language | Rust | Python |
 
-⸻
+---
 
-Project Structure
+## Project Structure
 
+```
 crates/
 ├── ls-gateway/   # HTTP server + routing
 ├── ls-asf/       # AWS service framework
@@ -260,41 +295,42 @@ crates/
 ├── ls-sqs/       # SQS implementation
 ├── ls-sns/       # SNS implementation
 └── ls-s3/        # S3 implementation
+```
 
-⸻
+---
 
-Current Status
+## Current Status
 
 Ferro is under active development.
 
-Implemented:
+**Implemented:**
 
-* ✅ SQS
-* ✅ SNS
-* ✅ S3
+- ✅ SQS
+- ✅ SNS
+- ✅ S3
 
-Planned:
+**Planned:**
 
-* ⏳ Lambda
-* ⏳ DynamoDB
-* ⏳ Web UI
-* ⏳ Metrics endpoint
+- ⏳ Lambda
+- ⏳ DynamoDB
+- ⏳ Web UI
+- ⏳ Metrics endpoint
 
-⸻
+---
 
-Contributing
+## Contributing
 
 PRs and issues are welcome.
 
 If you find compatibility issues with AWS SDKs or APIs, open an issue with:
 
-* SDK version
-* Request example
-* Expected behavior
-* Actual behavior
+- SDK version
+- Request example
+- Expected behavior
+- Actual behavior
 
-⸻
+---
 
-License
+## License
 
 MIT

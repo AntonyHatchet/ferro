@@ -333,4 +333,6 @@ If you find compatibility issues with AWS SDKs or APIs, open an issue with:
 
 ## License
 
-MIT
+Apache-2.0
+
+Ferro began as a fork of LocalStack and has since been rewritten from scratch in Rust. It is not affiliated with LocalStack, Inc.
